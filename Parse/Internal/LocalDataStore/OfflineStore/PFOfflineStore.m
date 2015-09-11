@@ -297,6 +297,32 @@ int const PFOfflineStoreMaximumSQLVariablesCount = 999;
 #pragma mark - Save
 ///--------------------------------------
 
+- (BFTask *)_collectAndFetchAllChildrenOfObject:(PFObject *)object database:(PFSQLiteDatabase *)database {
+    NSMutableArray *fetchTasks = [NSMutableArray array];
+    NSMutableSet *children = [NSMutableSet set];
+    [PFInternalUtils traverseObject:object usingBlock:^id(id object) {
+        if ([object isKindOfClass:[PFObject class]]) {
+            if (![object isDataAvailable]) {
+                BFTask *task = [[self fetchObjectLocallyAsync:object
+                                                     database:database] continueWithSuccessBlock:^id(BFTask *task) {
+                    return [[self _collectAndFetchAllChildrenOfObject:object
+                                                            database:database] continueWithBlock:^id(BFTask *task) {
+                        [children addObjectsFromArray:task.result];
+                        return nil;
+                    }];
+                }];
+                [fetchTasks addObject:task];
+            }
+            [children addObject:object];
+        }
+        return object;
+    }];
+
+    return [[BFTask taskForCompletionOfAllTasks:fetchTasks] continueWithSuccessBlock:^id(BFTask *task) {
+        return [children allObjects];
+    }];
+}
+
 - (BFTask *)saveObjectLocallyAsync:(PFObject *)object includeChildren:(BOOL)includeChildren {
     //TODO: (nlutsenko) Remove this method, replace with LocalStore implementation that wraps OfflineStore + Pin.
     return [self _performDatabaseTransactionAsyncWithBlock:^BFTask *(PFSQLiteDatabase *database) {
@@ -314,17 +340,14 @@ int const PFOfflineStoreMaximumSQLVariablesCount = 999;
                    includeChildren:(BOOL)includeChildren
                           database:(PFSQLiteDatabase *)database {
     //TODO: (nlutsenko) Remove this method, replace with LocalStore implementation that wraps OfflineStore + Pin.
-    NSMutableArray *children = nil;
+    BFTask *childrenTask = [BFTask taskWithResult:nil];
     if (includeChildren) {
-        children = [NSMutableArray array];
-        [PFInternalUtils traverseObject:object usingBlock:^id(id traversedObject) {
-            if ([traversedObject isKindOfClass:[PFObject class]]) {
-                [children addObject:traversedObject];
-            }
-            return traversedObject;
-        }];
+        childrenTask = [self _collectAndFetchAllChildrenOfObject:object database:database];
     }
-    return [self saveObjectLocallyAsync:object withChildren:children database:database];
+
+    return [childrenTask continueWithSuccessBlock:^id(BFTask *task) {
+        return [self saveObjectLocallyAsync:object withChildren:task.result database:database];
+    }];
 }
 
 - (BFTask *)saveObjectLocallyAsync:(PFObject *)object
